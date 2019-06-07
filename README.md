@@ -4,4 +4,4 @@
 *	Proposed Gradient Boosting as the optimal model with 36% improvement over the baseline model in terms of accuracy.
 *	Characterized climate and building-type as the critical predictors of electrical cooling demand for devising effectual policies to enhance operation management of commercial building.
 
-* _Models used_: Generalized linear model, support vector machine, generalized additive model, Multivariate adaptive regression spline, classification and regression trees, bayesian additive regression trees, random forest
+**Models used**: Generalized linear model, support vector machine, generalized additive model, Multivariate adaptive regression spline, classification and regression trees, bayesian additive regression trees, random forest
