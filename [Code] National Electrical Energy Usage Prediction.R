@@ -1,0 +1,505 @@
+# title: "National Electrical Energy Usage Prediction"
+
+  ```{r}
+# load libraries
+library(ggplot2)
+library(DataExplorer)
+library(caret)
+library(glmnet)
+library(e1071)
+library(mgcv)
+library(earth)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+
+```
+
+```{r load the data set}
+#load the South region data set 
+data <- read.table("./2012_public_use_data_aug2016_copy.csv",head = TRUE,         
+                   sep=",",stringsAsFactors = F)
+#extract the south region's data
+data <- subset(data,REGION==3)
+#reset row number
+rownames(data) <- 1:nrow(data)
+```
+
+## Overview
+```{r}
+str(data) # ALL int
+dim(data) # 2592 * 70
+```
+## Reorder the columns - for better feature selection
+```{r reorder the columns}
+# response variable, electricity feature, climate,cooling feature, building feature,others
+# drop PUBID, REGION, 
+
+reordered.df = data[,c("ELCLBTU", 
+                       #electricity feature
+                       "ELBTU","ELCOOL",
+                       #climate feature
+                       "CENDIV","PUBCLIM","CDD65","DAYLTP",
+                       #cooling feature
+                       "NWMNCL","MAINCL","NGCOOL","FKCOOL","PRCOOL","STCOOL","HWRDCL","COOLP",
+                       #building construction feature
+                       "AWN","REFL","TINT","WINTYP","CONFSPP","YRCONC","FLCEILHT","NFLOOR","RFCOOL","RFCNS","WLCNS","SQFT",
+                       #building occupantion feature
+                       "NWKERC","WKHRSC","OCCUPYP","WHOPPR","GOVOWN","PBA",
+                       #others
+                       "DATACNTR","SERVERC","LAPTPC","PCTRMC","RFGICN","POOL")]
+dim(reordered.df) # 2592  * 40
+
+```
+```{r}
+head(reordered.df)
+```
+
+
+## Data Cleaning
+### Missing values
+```{r drop columns and rows with too much NAs}
+
+
+#drop rows missing response var
+indice.drop <- which(is.na(reordered.df$ELCLBTU))
+reordered.df <- reordered.df[-indice.drop,]  #2513 rows
+
+#drop columns and rows with more than 50% NAs
+
+# calculate number of NAs for each features
+count <- colSums(is.na(reordered.df))
+# calculate how many rows contain more than 50% NAs
+col.drop <- length(count[count>= dim(reordered.df)[1]*0.20])
+# find column indice for columns contain more than 50% NAs
+c <- order(count, decreasing = T)[1:col.drop]
+#reordered.df[,c]
+reordered.df <- reordered.df[,-c]
+
+
+# calculate number of NAs for each row
+count.na <- rowSums(is.na(reordered.df))
+# calculate how many rows contain more than 5 NAs
+row.drop <- length(count.na[count.na>=5])
+#since the number of rows contain more than 5 NAs doesn't exceed 5% of observations
+r = order(count.na, decreasing = T)[1:row.drop]
+reordered.df<-reordered.df[-r,]
+
+#drop rows miss "building construction features"
+indice <- which(is.na(reordered.df$TINT))
+reordered.df<-reordered.df[-indice,]
+
+#drop rows didn't use elec for cooling
+indice <- which(reordered.df$ELCOOL==2)
+reordered.df<-reordered.df[-indice,]
+
+```
+## Imputtion
+```{r imputation}
+
+# calculate number of NAs for each row
+count.na <- rowSums(is.na(reordered.df))
+# calculate how many rows contain NAs 
+row.drop<-order(count.na, decreasing = T)
+
+#impute missing 'other features' with median value 
+
+df.complete <- reordered.df[complete.cases(reordered.df),]
+PCTRMC.med<-median(df.complete$PCTRMC)
+reordered.df[which(is.na(reordered.df$PCTRMC)),"PCTRMC"]<-rep(PCTRMC.med,length(which(is.na(reordered.df$PCTRMC))))
+
+LAPTPC.med<-median(df.complete$LAPTPC)
+reordered.df[which(is.na(reordered.df$LAPTPC)),"LAPTPC"]<-rep(LAPTPC.med,length(which(is.na(reordered.df$LAPTPC))))
+
+SERVERC.med<-median(df.complete$SERVERC)
+reordered.df[which(is.na(reordered.df$SERVERC)),"SERVERC"]<-rep(SERVERC.med,length(which(is.na(reordered.df$SERVERC))))
+#impute NAs in MAINCL as 8, NAs in COOLP as 100
+
+reordered.df[which(is.na(reordered.df$MAINCL)),"MAINCL"]<-rep(8,length(which(is.na(reordered.df$MAINCL))))
+
+reordered.df[which(is.na(reordered.df$COOLP)),"COOLP"]<-rep(100,length(which(is.na(reordered.df$COOLP))))
+
+df <- reordered.df[complete.cases(reordered.df),]
+df<-df[,-3]
+```
+### Convert numeircal type into factor type
+```{r as.factor}
+
+list.chr <- c("CENDIV","PUBCLIM","MAINCL","AWN","REFL","TINT","WINTYP","RFCOOL","RFCNS","WLCNS","GOVOWN","PBA")
+for (i in 1:length(list.chr)){
+  df[,list.chr[i]]<-as.factor(df[,list.chr[i]])
+  
+}
+df[which(df$FLCEILHT==995),"FLCEILHT"]<-rep(60,2)
+df[which(df$NFLOOR==994),"NFLOOR"]<-rep(20,length(which(df$NFLOOR==994)))
+df[which(df$NFLOOR==995),"NFLOOR"]<-rep(30,length(which(df$NFLOOR==995)))
+#str(df)
+
+```
+
+## Data exploration
+### Check correlation
+```{r plot_correlation}
+# numerical var
+plot_correlation(df)
+
+```
+### Distribution of response variable y
+```{r distribution of y}
+
+
+a <- ggplot(data = df, aes(x =ELCLBTU )) + theme(plot.title = element_text(face = "italic",hjust = 0.5))
+plot.y <- a + geom_density( fill = "white", colour = "red")+ggtitle("Density plot of Electricity cooling use (thous Btu)")
+plot.y
+#After log transformation
+b <- ggplot(data = df, aes(x = log(df$ELCLBTU))) + theme(plot.title = element_text(face = "italic",hjust = 0.5))
+plot.y <- b + geom_density( fill = "white", colour = "red")+ggtitle("Density plot of log-transformed Electricity cooling use (thous Btu)")
+plot.y
+summary(df$ELCLBTU)
+summary(log(df$ELCLBTU))
+```
+### Standardization
+```{r standardization}
+
+# calculate the pre-process parameters from numerical predictors
+df.n <- df[,c("ELBTU","CDD65","DAYLTP","COOLP","YRCONC","FLCEILHT","NFLOOR","SQFT","NWKERC","WKHRSC","SERVERC","LAPTPC","PCTRMC")]
+preprocessParams <- preProcess(df.n, method=c("center", "scale"))
+# transform the dataset using the parameters
+transformed.df <- predict(preprocessParams, df.n)
+
+df[,c("ELBTU","CDD65","DAYLTP","COOLP","YRCONC","FLCEILHT","NFLOOR","SQFT","NWKERC","WKHRSC","SERVERC","LAPTPC","PCTRMC")]<-transformed.df
+
+rownames(df) <- 1:nrow(df)
+
+```
+## Modeling
+### split the data
+```{r split the data}
+#splitting the data into 80% training and 20% test
+set.seed(1112)
+train_size <- round(.80 * nrow(df))
+train_index <- sample(1:nrow(df), size = train_size) 
+df_train <- df[train_index,]
+df_test <- df[-train_index,]
+#str(df)
+```
+### Null model
+```{r null model}
+
+null.pred <- mean(df_train$ELCLBTU)
+NULL_MAE <-mean(abs(null.pred - df_test$ELCLBTU))
+NULL_RMSE <-mean((null.pred - df_test$ELCLBTU)^2)^0.5
+
+```
+### GLM 
+```{r}
+## h2o package
+library(h2o)
+h2o.init()
+
+# convert data to h2o object
+ELCLBTU_h2o <- df_train %>%
+  mutate(ELCLBTU_log = log(df_train$ELCLBTU)) %>%
+  as.h2o()
+
+# set the response column to Sale_Price_log
+response <- "ELCLBTU_log"
+
+# set the predictor names
+predictors <- setdiff(colnames(df_train), "ELCLBTU")
+
+
+# try using the `alpha` parameter:
+# train your model, where you specify alpha
+glm <- h2o.glm(
+  x = predictors, 
+  y = response, 
+  training_frame = ELCLBTU_h2o,
+  nfolds = 10,
+  keep_cross_validation_predictions = TRUE,
+  alpha = .25
+)
+
+# print the mse for the validation data
+print(h2o.mse(glm, xval = TRUE))
+
+# grid over `alpha`
+# select the values for `alpha` to grid over
+hyper_params <- list(
+  alpha = seq(0, 1, by = .1),
+  lambda = seq(0.0001, 10, length.out = 10)
+)
+
+# this example uses cartesian grid search because the search space is small
+# and we want to see the performance of all models. For a larger search space use
+# random grid search instead: {'strategy': "RandomDiscrete"}
+
+# build grid search with previously selected hyperparameters
+grid <- h2o.grid(
+  x = predictors, 
+  y = response, 
+  training_frame = ELCLBTU_h2o, 
+  nfolds = 10,
+  keep_cross_validation_predictions = TRUE,
+  algorithm = "glm",
+  grid_id = "ELCLBTU_grid", 
+  hyper_params = hyper_params,
+  search_criteria = list(strategy = "Cartesian")
+)
+
+# Sort the grid models by mse
+sorted_grid <- h2o.getGrid("ELCLBTU_grid", sort_by = "mse", decreasing = FALSE)
+sorted_grid
+
+# grab top model id
+best_h2o_model <- sorted_grid@model_ids[[1]]
+best_model <- h2o.getModel(best_h2o_model)
+
+#lm_MAE <- abs(mean(df_test$ELCLBTU - 10^predict(lm,newdata = df_test)))
+#lm_RMSE <-mean((df_test$ELCLBTU - 10^predict(lm,newdata = df_test))^2)^0.5
+```
+### SVM
+```{r SVM}
+
+tune.out <- tune(svm, ELCLBTU~., data = df_train,
+                 ranges = list(cost = c(0.1,1,10,100,1000),
+                               gamma = c(0.5,1,2,3,4)))
+# show best model
+tune.out$best.model
+
+svmfit <- svm(ELCLBTU~., data = df_train, kernel="radial", cost=10,gamma=0.5,scale = FALSE)
+summary(svmfit)
+SVM_MAE = mean(abs(df_test$ELCLBTU -predict(svmfit,newdata = df_test)));SVM_MAE
+SVM_RMSE = mean((df_test$ELCLBTU -predict(svmfit,newdata = df_test))^2)^0.5;SVM_RMSE
+```
+### GAM
+```{r GAM}
+#first, fit a full model
+
+gam0 <- gam( ELCLBTU ~ s(ELBTU) + s(CDD65) + 
+               DAYLTP + s(COOLP) + s(YRCONC,k=10) + s(FLCEILHT) + 
+               NFLOOR + s(SQFT) + 
+               s(NWKERC,k=12)+ s(WKHRSC,k=7) +
+               s(SERVERC,k=8)+ LAPTPC +
+               s(PCTRMC,k=10) + CENDIV + PUBCLIM + MAINCL + AWN + REFL + TINT + WINTYP + RFCOOL + RFCNS + WLCNS + GOVOWN + PBA,
+             data=df_train,family=Gamma(link=log),method="REML") #method="GCV"
+
+summary(gam0)
+
+par(mfrow = c(2,2))
+plot(gam0)
+
+par(mfrow = c(2,2))
+gam.check(gam0)
+
+#method="GCV"
+
+MARS_MAE = mean(abs(df_test$ELCLBTU -predict(gam0,newdata = df_test)));MARS_MAE
+MARS_RMSE = mean((df_test$ELCLBTU -predict(gam0,newdata = df_test))^2)^0.5;MARS_RMSE
+
+```
+
+### MARS
+```{r MARS}
+
+#there are two tuning parameters associated with MARS model: the degree of interactions and the number of retained terms.
+
+MARS_p1 <- earth(ELCLBTU ~.,data=df_train,pmethod = "backward")
+MARS_p1$selected.terms
+summary(MARS_p1)
+#summary(MARS_p) %>% .$coefficients %>% head(10)
+plotmo(MARS_p1)
+
+#gridsearch
+hyper_grid_1 <- expand.grid(degree = 1:3, 
+                            nprune = floor(seq(1,10, length.out = 10)) )
+
+# for reproducibiity
+set.seed(1112)
+
+# cross validated model using caret package
+tuned_mars1 <- train(
+  x = subset(df_train, select = -ELCLBTU),
+  y = df_train$ELCLBTU,
+  method = "earth",
+  metric = "RMSE",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = hyper_grid_1
+)
+
+# best model
+tuned_mars1$bestTune
+
+
+RMSEcv_1 <- ggplot(tuned_mars1)+labs(x = "Number of retained terms")+theme(plot.title = element_text(face = "italic",hjust = 0.5))+ggtitle("Cross-validated RMSE for the 30 Different Hyperparameter Combinations");
+RMSEcv_1
+
+MARS_p <- earth(ELCLBTU ~.,data=df_train,pmethod = "backward",nprune=5,degree=2)
+summary(MARS_p)
+#summary(MARS_p) %>% .$coefficients %>% head(10)
+plotmo(MARS_p)
+
+# variable importance plots
+p1 <- vip(MARS_p, num_features = 5, bar = FALSE)+theme(plot.title = element_text(face = "italic",hjust = 0.5))+ggtitle("Variable Importance Based on Impact to GCV");p1
+
+summary(MARS_p)$coefficients
+
+MARS_MAE = mean(abs(df_test$ELCLBTU -predict(MARS_p,newdata = df_test)));MARS_MAE
+MARS_RMSE = mean((df_test$ELCLBTU -predict(MARS_p,newdata = df_test))^2)^0.5;MARS_RMSE
+
+
+```
+### CART
+```{r CART}
+cart <- rpart(ELCLBTU~.,data = df_train, method = "anova")
+plotcp(cart)
+summary(cart)
+
+get_min_error <- function(x) {
+  min    <- which.min(x$cptable[, "xerror"])
+  xerror <- x$cptable[min, "xerror"] 
+}
+min_error <- get_min_error(cart)
+min_error
+#if need prune
+opt <- cart$cptable[which.min(cart$cptable[,"xerror"]),"CP"]
+
+cart_p <- rpart(ELCLBTU~.,data = df_train, method = "anova", control = list(cp = opt))
+rpart.plot(cart_p)
+
+#predict
+cart.pred <- predict(cart_p,newdata = df_test)
+CART_RMSE <- mean((cart.pred - df_test$ELCLBTU)^2)^0.5;CART_RMSE
+CART_MAE = mean(abs(cart.pred - df_test$ELCLBTU));CART_MAE
+
+
+
+```
+### BART
+```{r BART}
+library(rJava)
+library(bartMachine)
+options(java.parameters = "-Xmx12g")    #set the amount of memory for calculation
+df.response <-df_train$ELCLBTU
+df.covariate <-df_train[,-1]
+bart <- bartMachine(X = df.covariate,y=df.response,seed=1112)
+rmse_by_num_trees(bart, 
+                  tree_list=c(10,20,30,40),
+                  num_replicates=5)    #plots of number of trees
+bart_machine_cv <- bartMachineCV(X = df.covariate,y=df.response,seed=1112)#grid search
+
+#bartMachine CV win: k: 3 nu, q: 3, 0.99 m: 50 
+bart <- bartMachine(X = df.covariate,y=df.response,k = 3, nu = 3, q = 0.99, num_trees = 40,seed=590)
+
+
+df.covariate_test <-df_train[,-1]
+bart.pred <- predict(bart,df.covariate_test)
+BART_RMSE <- mean((bart.pred - df_test$ELCLBTU)^2)^0.5;BART_RMSE
+BART_MAE = mean(abs(bart.pred - df_test$ELCLBTU));BART_MAE
+
+
+```
+### Random Forest
+```{r Random forest}
+library(rsample)      # data splitting 
+library(ranger)       # a faster implementation of randomForest
+
+# create training and validation data 
+set.seed(1112)
+valid_split <- initial_split(df_train, .8)
+
+# training data
+df_train_v2 <- analysis(valid_split)
+
+# validation data
+df_valid <- assessment(valid_split)
+x_test <- df_valid[setdiff(names(df_valid), "ELCLBTU")]
+y_test <- df_valid$ELCLBTU
+
+rf_oob_comp <- randomForest(
+  formula = ELCLBTU ~ .,
+  data    = df_train_v2,
+  xtest   = x_test,
+  ytest   = y_test
+)
+
+# extract OOB & validation errors
+oob <- sqrt(rf_oob_comp$mse)
+validation <- sqrt(rf_oob_comp$test$mse)
+
+# compare error rates
+tibble::tibble(
+  `Out of Bag Error` = oob,
+  `Test error` = validation,
+  ntrees = 1:rf_oob_comp$ntree
+) %>%
+  gather(Metric, RMSE, -ntrees) %>%
+  ggplot(aes(ntrees, RMSE, color = Metric)) +
+  geom_line() +
+  scale_y_continuous(labels = scales::dollar) +
+  xlab("Number of trees")
+
+
+# hyperparameter grid search
+hyper_grid <- expand.grid(
+  mtry       = seq(2, 25, by = 5),
+  node_size  = seq(3, 7, by = 2),
+  sampe_size = c(.55, .632, .80),
+  num.trees  = c(100,200,300,400),
+  OOB_RMSE   = 0
+)
+
+# total number of combinations
+nrow(hyper_grid)
+
+for(i in 1:nrow(hyper_grid)) {
+  
+  # train model
+  model <- ranger(
+    formula         = ELCLBTU ~ .-ELBTU, 
+    data            = df_train, 
+    num.trees       = hyper_grid$num.trees[i],
+    mtry            = hyper_grid$mtry[i],
+    min.node.size   = hyper_grid$node_size[i],
+    sample.fraction = hyper_grid$sampe_size[i],
+    seed            = 1112
+  )
+  
+  # add OOB error to grid
+  hyper_grid$OOB_RMSE[i] <- sqrt(model$prediction.error)
+}
+
+hyper_grid[which(hyper_grid$OOB_RMSE==min(hyper_grid$OOB_RMSE)),]
+varImp(rf)
+
+rf$variable.importance
+rf <- ranger(
+  formula         = ELCLBTU ~ ., 
+  data            = df_train, 
+  num.trees       = 100,
+  mtry            = 22,
+  min.node.size   = 3,
+  sample.fraction = 0.8,
+  seed            = 1112,
+  importance      = 'impurity'
+)
+
+library(broom)
+rf$variable.importance %>% 
+  tidy() %>%
+  dplyr::arrange(desc(x)) %>%
+  dplyr::top_n(25) %>%
+  ggplot(aes(reorder(names, x), x)) +
+  geom_col() +
+  coord_flip() +
+  ggtitle("Plot of Variables Importance")
+
+rf<-randomForest(ELCLBTU~.,data=df_train
+)
+partialPlot(rf,pred.data = df_train,x.var = "NWKERC")
+
+rf.pred <- predict(rf,df_test)
+rf_RMSE<-mean((rf.pred$predictions-df_test$ELCLBTU)^2)^0.5
+rf_MAE<-mean(abs(rf.pred$predictions-df_test$ELCLBTU))
+
+```
